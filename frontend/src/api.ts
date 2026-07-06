@@ -160,7 +160,7 @@ export const api = {
     prompt: string,
     selectedDatabases: string[] | undefined,
     conversationId: string | undefined,
-    onStep: (step: { title: string; description: string; status: string }) => void,
+    onStep: (step: any) => void,
     onResult: (result: any) => void,
     onError: (message: string) => void,
   ): Promise<void> {

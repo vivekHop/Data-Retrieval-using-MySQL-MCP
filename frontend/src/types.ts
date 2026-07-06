@@ -34,7 +34,19 @@ export interface Message {
   error?: string | null;
   timestamp: string;
   suggestedQuestions?: string[];
-  steps?: { title: string; description: string; status: string }[] | null;
+  geminiCallsCount?: number;
+  steps?: {
+    title: string;
+    description: string;
+    status: string;
+    sql?: string;
+    columns?: string[];
+    rows?: any[][];
+    execution_time_ms?: number;
+    row_count?: number;
+    error?: string;
+    database?: string;
+  }[] | null;
 }
 
 export interface Conversation {

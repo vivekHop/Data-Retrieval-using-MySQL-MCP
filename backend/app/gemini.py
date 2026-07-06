@@ -141,9 +141,10 @@ async def run_gemini_tool_loop_streaming(
         return
 
     timeline_steps: List[Dict[str, Any]] = []
+    gemini_calls_count = 0
 
-    def emit_step(title: str, description: str, status: str = "completed") -> Dict[str, Any]:
-        step = {"title": title, "description": description, "status": status}
+    def emit_step(title: str, description: str, status: str = "completed", **kwargs) -> Dict[str, Any]:
+        step = {"title": title, "description": description, "status": status, **kwargs}
         timeline_steps.append(step)
         return step
 
@@ -191,6 +192,7 @@ async def run_gemini_tool_loop_streaming(
             "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
         }
 
+        gemini_calls_count += 1
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(url, json=payload, headers=headers, timeout=45.0)
@@ -208,7 +210,8 @@ async def run_gemini_tool_loop_streaming(
                 db_save_message(
                     asst_msg_id, conversation_id, "assistant",
                     f"Gemini API Error: {err_msg}",
-                    error_message=err_msg, steps=timeline_steps
+                    error_message=err_msg, steps=timeline_steps,
+                    gemini_calls_count=gemini_calls_count
                 )
                 yield _sse("error", {"message": f"Gemini API Error: {err_msg}", "steps": timeline_steps})
                 return
@@ -228,7 +231,7 @@ async def run_gemini_tool_loop_streaming(
             # ── Final text response ───────────────────────────────────────────
             final_text = "".join(p.get("text", "") for p in parts if "text" in p)
 
-            step = emit_step("Synthesis & Response", "Gemini synthesized the results into a business explanation.")
+            step = emit_step("Synthesis & Response", f"Gemini synthesized the results into a business explanation. (Made {gemini_calls_count} Gemini calls)")
             yield _sse("step", step)
 
             # Suggested follow-up questions
@@ -250,6 +253,7 @@ async def run_gemini_tool_loop_streaming(
                 error_message=last_error,
                 suggested_questions=suggested,
                 steps=timeline_steps,
+                gemini_calls_count=gemini_calls_count
             )
 
             log_query(
@@ -274,6 +278,7 @@ async def run_gemini_tool_loop_streaming(
                 "error": last_error,
                 "suggested_questions": suggested,
                 "steps": timeline_steps,
+                "gemini_calls_count": gemini_calls_count
             }
             yield _sse("result", result_payload)
             return
@@ -310,14 +315,23 @@ async def run_gemini_tool_loop_streaming(
                     last_error = None
                     step = emit_step(
                         "SQL Executed ✓",
-                        f"Returned {last_row_count} rows in {last_exec_time:.1f}ms."
+                        f"Returned {last_row_count} rows in {last_exec_time:.1f}ms.",
+                        sql=last_sql,
+                        columns=last_columns,
+                        rows=last_rows,
+                        execution_time_ms=last_exec_time,
+                        row_count=last_row_count,
+                        database=last_db
                     )
                 else:
                     last_error = tool_result.get("error")
                     step = emit_step(
                         "SQL Execution Failed",
                         f"Error: {last_error}",
-                        "error"
+                        "error",
+                        sql=last_sql,
+                        error=last_error,
+                        database=last_db
                     )
                 yield _sse("step", step)
 
@@ -338,7 +352,8 @@ async def run_gemini_tool_loop_streaming(
     asst_msg_id = str(uuid.uuid4())
     db_save_message(
         asst_msg_id, conversation_id, "assistant",
-        err_text, sql=last_sql, error_message=err_text, steps=timeline_steps
+        err_text, sql=last_sql, error_message=err_text, steps=timeline_steps,
+        gemini_calls_count=gemini_calls_count
     )
 
     yield _sse("error", {"message": err_text, "steps": timeline_steps})

@@ -46,6 +46,7 @@ class QueryResponse(BaseModel):
     error: Optional[str] = None
     suggested_questions: List[str] = Field(default_factory=list)
     steps: Optional[List[Dict[str, Any]]] = None
+    gemini_calls_count: int = 0
 
 # Logging & Admin Models
 class AuditLogEntry(BaseModel):

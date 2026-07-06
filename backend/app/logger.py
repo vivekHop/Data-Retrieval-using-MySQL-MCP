@@ -64,6 +64,8 @@ def init_audit_db():
                 steps TEXT -- JSON array of timeline steps
             )
         """)
+        # Migration for existing databases
+        cursor.execute("ALTER TABLE conversation_messages ADD COLUMN IF NOT EXISTS gemini_calls_count INTEGER DEFAULT 0")
         
         conn.commit()
         cursor.close()
@@ -240,7 +242,8 @@ def db_save_message(
     database_used: Optional[str] = None,
     error_message: Optional[str] = None,
     suggested_questions: Optional[List[str]] = None,
-    steps: Optional[List[Dict[str, Any]]] = None
+    steps: Optional[List[Dict[str, Any]]] = None,
+    gemini_calls_count: int = 0
 ):
     """Inserts a conversation message into the Neon database."""
     if not settings.DATABASE_URL:
@@ -259,8 +262,8 @@ def db_save_message(
             INSERT INTO conversation_messages (
                 id, conversation_id, role, text, sql, columns, rows, 
                 execution_time_ms, row_count, database_used, error_message, 
-                timestamp, suggested_questions, steps
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                timestamp, suggested_questions, steps, gemini_calls_count
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 text = EXCLUDED.text,
                 sql = EXCLUDED.sql,
@@ -271,11 +274,12 @@ def db_save_message(
                 database_used = EXCLUDED.database_used,
                 error_message = EXCLUDED.error_message,
                 suggested_questions = EXCLUDED.suggested_questions,
-                steps = EXCLUDED.steps
+                steps = EXCLUDED.steps,
+                gemini_calls_count = EXCLUDED.gemini_calls_count
         """, (
             msg_id, conversation_id, role, text, sql, cols_str, rows_str,
             execution_time_ms, row_count, database_used, error_message,
-            timestamp, sug_str, steps_str
+            timestamp, sug_str, steps_str, gemini_calls_count
         ))
         
         conn.commit()
@@ -294,7 +298,7 @@ def db_get_messages(conversation_id: str) -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, role, text, sql, columns, rows, execution_time_ms, 
-                   row_count, database_used, error_message, timestamp, suggested_questions, steps
+                   row_count, database_used, error_message, timestamp, suggested_questions, steps, gemini_calls_count
             FROM conversation_messages
             WHERE conversation_id = %s
             ORDER BY timestamp ASC
@@ -304,6 +308,7 @@ def db_get_messages(conversation_id: str) -> List[Dict[str, Any]]:
             rows = json.loads(r[5]) if r[5] else None
             sugs = json.loads(r[11]) if r[11] else []
             steps = json.loads(r[12]) if r[12] else None
+            gemini_calls = r[13] if len(r) > 13 and r[13] is not None else 0
             
             results.append({
                 "id": r[0],
@@ -318,7 +323,8 @@ def db_get_messages(conversation_id: str) -> List[Dict[str, Any]]:
                 "error": r[9],
                 "timestamp": r[10],
                 "suggestedQuestions": sugs,
-                "steps": steps
+                "steps": steps,
+                "geminiCallsCount": gemini_calls
             })
         cursor.close()
         conn.close()

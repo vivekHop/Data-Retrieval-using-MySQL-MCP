@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { api } from '../api';
 import type { Message, UserSession } from '../types';
 import { Send, Loader2, Database, Code, Table2, BarChart3, Copy, Check, Download, AlertCircle, Sparkles } from 'lucide-react';
-import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
+import { ResponsiveContainer, BarChart, Bar, AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 
 interface ChatWindowProps {
   session: UserSession;
@@ -36,7 +36,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   const [copiedSqlIndex, setCopiedSqlIndex] = useState<number | null>(null);
   const [copiedTableIndex, setCopiedTableIndex] = useState<number | null>(null);
   const [activeViews, setActiveViews] = useState<Record<number, 'table' | 'chart'>>({});
-  const [collapsedSql, setCollapsedSql] = useState<Record<number, boolean>>({});
+  const [collapsedSql, setCollapsedSql] = useState<Record<string | number, boolean>>({});
+
+  const [chartTypes, setChartTypes] = useState<Record<number, 'bar' | 'line' | 'area'>>({});
 
   // Real-time SSE timeline steps — populated as backend emits each step
   const [liveSteps, setLiveSteps] = useState<{ title: string; description: string; status: string }[]>([]);
@@ -104,6 +106,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
           database: finalResult.database_used,
           error: finalResult.error,
           suggestedQuestions: finalResult.suggested_questions,
+          geminiCallsCount: finalResult.gemini_calls_count,
           steps: finalResult.steps,
           timestamp: new Date().toISOString(),
         };
@@ -186,44 +189,61 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   };
 
   // Determine if a message dataset can be charted
-  // We need at least one string/category column and one numeric column
   const getChartConfig = (columns?: string[] | null, rows?: any[][] | null) => {
-    if (!columns || !rows || rows.length === 0) return null;
+    if (!columns || !rows || rows.length < 2 || columns.length < 2) return null;
+
+    // Helper to check if a column is mostly numeric
+    const isColumnNumeric = (colIndex: number) => {
+      let numericCount = 0;
+      let totalCount = 0;
+      for (const row of rows) {
+        const val = row[colIndex];
+        if (val === null || val === undefined || val === '') continue;
+        totalCount++;
+        if (!isNaN(Number(val))) {
+          numericCount++;
+        }
+      }
+      return totalCount > 0 && (numericCount / totalCount) >= 0.8;
+    };
+
+    const numericIndices: number[] = [];
+    const nonNumericIndices: number[] = [];
+
+    for (let i = 0; i < columns.length; i++) {
+      if (isColumnNumeric(i)) {
+        numericIndices.push(i);
+      } else {
+        nonNumericIndices.push(i);
+      }
+    }
 
     let categoryColIndex = -1;
     let valueColIndex = -1;
 
-    // Look for a numeric column first (total_revenue, salary, stock_quantity, amount, total_amount, etc.)
-    for (let i = 0; i < columns.length; i++) {
-      const isNumeric = rows.every((row) => {
-        const val = row[i];
-        return val === null || typeof val === 'number' || (!isNaN(Number(val)) && val !== '');
-      });
-      if (isNumeric) {
-        valueColIndex = i;
-        break;
+    if (numericIndices.length > 0) {
+      valueColIndex = numericIndices[0];
+
+      if (nonNumericIndices.length > 0) {
+        categoryColIndex = nonNumericIndices[0];
+      } else if (numericIndices.length > 1) {
+        categoryColIndex = numericIndices[0];
+        valueColIndex = numericIndices[1];
+      } else {
+        categoryColIndex = 0;
+        valueColIndex = 0;
       }
     }
 
-    // Look for a string/name column (first_name, name, category, payment_status, payment_method, country)
-    for (let i = 0; i < columns.length; i++) {
-      if (i === valueColIndex) continue;
-      const isString = rows.some((row) => typeof row[i] === 'string');
-      if (isString) {
-        categoryColIndex = i;
-        break;
-      }
+    if (categoryColIndex === valueColIndex && columns.length >= 2) {
+      categoryColIndex = 0;
+      valueColIndex = 1;
     }
 
-    // Default fallbacks if no string column is found but we have numbers
-    if (valueColIndex !== -1 && categoryColIndex === -1) {
-      categoryColIndex = 0; // Default to first column as labels
-    }
-
-    if (valueColIndex !== -1 && categoryColIndex !== -1) {
+    if (valueColIndex !== -1 && categoryColIndex !== -1 && categoryColIndex !== valueColIndex) {
       const data = rows.map((row) => ({
-        name: String(row[categoryColIndex]),
-        value: Number(row[valueColIndex]),
+        name: String(row[categoryColIndex] === null || row[categoryColIndex] === undefined ? 'NULL' : row[categoryColIndex]),
+        value: Number(row[valueColIndex] || 0),
       }));
       return {
         data,
@@ -456,34 +476,87 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 <span className="text-gray-400 font-medium font-mono">
                                   {msg.executionTimeMs?.toFixed(1)}ms
                                 </span>
+                                {msg.geminiCallsCount !== undefined && msg.geminiCallsCount > 0 && (
+                                  <>
+                                    <span className="text-gray-600 font-medium">|</span>
+                                    <span className="text-gray-400 font-medium">
+                                      {msg.geminiCallsCount} Gemini {msg.geminiCallsCount === 1 ? 'call' : 'calls'}
+                                    </span>
+                                  </>
+                                )}
                               </div>
 
                               <div className="flex items-center gap-1.5">
                                 {/* Toggle views */}
                                 {chartConfig && (
-                                  <div className="bg-brand-panel border border-brand-border/60 p-0.5 rounded-lg flex gap-0.5 mr-2">
-                                    <button
-                                      onClick={() => setActiveViews((prev) => ({ ...prev, [idx]: 'table' }))}
-                                      className={`p-1 rounded-md transition-all cursor-pointer ${
-                                        !isViewChart
-                                          ? 'bg-brand-border text-brand-green'
-                                          : 'text-gray-500 hover:text-gray-300'
-                                      }`}
-                                      title="Table View"
-                                    >
-                                      <Table2 className="w-3.5 h-3.5" />
-                                    </button>
-                                    <button
-                                      onClick={() => setActiveViews((prev) => ({ ...prev, [idx]: 'chart' }))}
-                                      className={`p-1 rounded-md transition-all cursor-pointer ${
-                                        isViewChart
-                                          ? 'bg-brand-border text-brand-green'
-                                          : 'text-gray-500 hover:text-gray-300'
-                                      }`}
-                                      title="Chart View"
-                                    >
-                                      <BarChart3 className="w-3.5 h-3.5" />
-                                    </button>
+                                  <div className="flex items-center gap-1.5 mr-2">
+                                    <div className="bg-brand-panel border border-brand-border/60 p-0.5 rounded-lg flex gap-0.5 animate-slide-in">
+                                      <button
+                                        type="button"
+                                        onClick={() => setActiveViews((prev) => ({ ...prev, [idx]: 'table' }))}
+                                        className={`p-1 rounded-md transition-all cursor-pointer ${
+                                          !isViewChart
+                                            ? 'bg-brand-border text-brand-green animate-pulse-subtle'
+                                            : 'text-gray-500 hover:text-gray-300'
+                                        }`}
+                                        title="Table View"
+                                      >
+                                        <Table2 className="w-3.5 h-3.5" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setActiveViews((prev) => ({ ...prev, [idx]: 'chart' }))}
+                                        className={`p-1 rounded-md transition-all cursor-pointer ${
+                                          isViewChart
+                                            ? 'bg-brand-border text-brand-green animate-pulse-subtle'
+                                            : 'text-gray-500 hover:text-gray-300'
+                                        }`}
+                                        title="Chart View"
+                                      >
+                                        <BarChart3 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+
+                                    {isViewChart && (
+                                      <div className="bg-brand-panel border border-brand-border/60 p-0.5 rounded-lg flex gap-0.5 animate-slide-in">
+                                        <button
+                                          type="button"
+                                          onClick={() => setChartTypes((prev) => ({ ...prev, [idx]: 'bar' }))}
+                                          className={`px-1.5 py-0.5 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
+                                            (chartTypes[idx] || 'bar') === 'bar'
+                                              ? 'bg-brand-border text-brand-green'
+                                              : 'text-gray-500 hover:text-gray-300'
+                                          }`}
+                                          title="Bar Chart"
+                                        >
+                                          Bar
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setChartTypes((prev) => ({ ...prev, [idx]: 'line' }))}
+                                          className={`px-1.5 py-0.5 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
+                                            chartTypes[idx] === 'line'
+                                              ? 'bg-brand-border text-brand-green'
+                                              : 'text-gray-500 hover:text-gray-300'
+                                          }`}
+                                          title="Line Chart"
+                                        >
+                                          Line
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => setChartTypes((prev) => ({ ...prev, [idx]: 'area' }))}
+                                          className={`px-1.5 py-0.5 text-[9px] font-bold rounded-md transition-all cursor-pointer ${
+                                            chartTypes[idx] === 'area'
+                                              ? 'bg-brand-border text-brand-green'
+                                              : 'text-gray-500 hover:text-gray-300'
+                                          }`}
+                                          title="Area Chart"
+                                        >
+                                          Area
+                                        </button>
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
@@ -513,23 +586,72 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
                             {/* View body */}
                             {isViewChart && chartConfig ? (
-                              <div className="p-4 bg-brand-dark/50 h-64 flex items-center justify-center">
+                              <div className="p-4 bg-brand-dark/50 h-64 flex items-center justify-center rounded-xl overflow-hidden border border-brand-border/20 transition-all duration-300">
                                 <ResponsiveContainer width="100%" height="100%">
-                                  <BarChart data={chartConfig.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="#232731" />
-                                    <XAxis dataKey="name" stroke="#9ca3af" fontSize={10} tickLine={false} />
-                                    <YAxis stroke="#9ca3af" fontSize={10} tickLine={false} />
-                                    <Tooltip
-                                      contentStyle={{
-                                        backgroundColor: '#14161d',
-                                        borderColor: '#232731',
-                                        borderRadius: '8px',
-                                        color: '#fff',
-                                        fontSize: '11px',
-                                      }}
-                                    />
-                                    <Bar dataKey="value" fill="#10b981" radius={[4, 4, 0, 0]} />
-                                  </BarChart>
+                                  {(chartTypes[idx] || 'bar') === 'line' ? (
+                                    <LineChart data={chartConfig.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#232731" vertical={false} />
+                                      <XAxis dataKey="name" stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <YAxis stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <Tooltip
+                                        contentStyle={{
+                                          backgroundColor: '#14161d',
+                                          borderColor: '#232731',
+                                          borderRadius: '8px',
+                                          color: '#fff',
+                                          fontSize: '11px',
+                                          backdropFilter: 'blur(4px)',
+                                        }}
+                                      />
+                                      <Line type="monotone" dataKey="value" stroke="#10b981" strokeWidth={2.5} activeDot={{ r: 6, stroke: '#10b981', strokeWidth: 1.5, fill: '#14161d' }} />
+                                    </LineChart>
+                                  ) : (chartTypes[idx] || 'bar') === 'area' ? (
+                                    <AreaChart data={chartConfig.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                      <defs>
+                                        <linearGradient id={`areaGradient_${idx}`} x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.4}/>
+                                          <stop offset="95%" stopColor="#10b981" stopOpacity={0.0}/>
+                                        </linearGradient>
+                                      </defs>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#232731" vertical={false} />
+                                      <XAxis dataKey="name" stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <YAxis stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <Tooltip
+                                        contentStyle={{
+                                          backgroundColor: '#14161d',
+                                          borderColor: '#232731',
+                                          borderRadius: '8px',
+                                          color: '#fff',
+                                          fontSize: '11px',
+                                          backdropFilter: 'blur(4px)',
+                                        }}
+                                      />
+                                      <Area type="monotone" dataKey="value" stroke="#10b981" fill={`url(#areaGradient_${idx})`} strokeWidth={2.5} />
+                                    </AreaChart>
+                                  ) : (
+                                    <BarChart data={chartConfig.data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                                      <defs>
+                                        <linearGradient id={`barGradient_${idx}`} x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="0%" stopColor="#10b981" stopOpacity={0.85}/>
+                                          <stop offset="100%" stopColor="#047857" stopOpacity={0.15}/>
+                                        </linearGradient>
+                                      </defs>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#232731" vertical={false} />
+                                      <XAxis dataKey="name" stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <YAxis stroke="#9ca3af" fontSize={9} tickLine={false} />
+                                      <Tooltip
+                                        contentStyle={{
+                                          backgroundColor: '#14161d',
+                                          borderColor: '#232731',
+                                          borderRadius: '8px',
+                                          color: '#fff',
+                                          fontSize: '11px',
+                                          backdropFilter: 'blur(4px)',
+                                        }}
+                                      />
+                                      <Bar dataKey="value" fill={`url(#barGradient_${idx})`} radius={[4, 4, 0, 0]} activeBar={{ stroke: '#10b981', strokeWidth: 1.5, fill: '#059669' }} />
+                                    </BarChart>
+                                  )}
                                 </ResponsiveContainer>
                               </div>
                             ) : (
@@ -571,27 +693,109 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         {/* Agent ReAct Loop Timeline Steps */}
                         {msg.steps && msg.steps.length > 0 && (
                           <div className="mt-4 pt-4 border-t border-brand-border/40">
-                            <h4 className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-3 flex items-center gap-1.5">
-                              <Sparkles className="w-3 h-3 text-brand-green" />
-                              Agent Execution Trace
+                            <h4 className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-3 flex items-center justify-between">
+                              <span className="flex items-center gap-1.5">
+                                <Sparkles className="w-3 h-3 text-brand-green" />
+                                Agent Execution Trace
+                              </span>
+                              {msg.geminiCallsCount !== undefined && msg.geminiCallsCount > 0 && (
+                                <span className="text-[9px] text-gray-500 font-semibold tracking-normal lowercase normal-case">
+                                  ({msg.geminiCallsCount} Gemini {msg.geminiCallsCount === 1 ? 'call' : 'calls'})
+                                </span>
+                              )}
                             </h4>
                             <div className="relative border-l border-brand-border/60 ml-2.5 pl-5 space-y-4 text-xs">
-                              {msg.steps.map((step, sIdx) => (
-                                <div key={sIdx} className="relative group/step">
-                                  {/* Bullet point node */}
-                                  <div className="absolute -left-[26.5px] top-1 w-3 h-3 rounded-full bg-brand-dark border-2 border-brand-green flex items-center justify-center shadow-md">
-                                    <div className="w-1 h-1 rounded-full bg-brand-green" />
-                                  </div>
-                                  <div className="space-y-0.5">
-                                    <div className="font-semibold text-gray-200 group-hover/step:text-brand-green transition-colors">
-                                      {step.title}
+                              {msg.steps.map((step, sIdx) => {
+                                const isStepSqlCollapsed = collapsedSql[`${idx}_step_${sIdx}`] !== false;
+                                return (
+                                  <div key={sIdx} className="relative group/step space-y-2">
+                                    {/* Bullet point node */}
+                                    <div className="absolute -left-[26.5px] top-1.5 w-3 h-3 rounded-full bg-brand-dark border-2 border-brand-green flex items-center justify-center shadow-md">
+                                      <div className="w-1 h-1 rounded-full bg-brand-green" />
                                     </div>
-                                    <div className="text-gray-400 leading-normal font-mono text-[10px]">
-                                      {step.description}
+                                    <div className="space-y-0.5">
+                                      <div className="font-semibold text-gray-200 group-hover/step:text-brand-green transition-colors">
+                                        {step.title}
+                                      </div>
+                                      <div className="text-gray-400 leading-normal font-mono text-[10px]">
+                                        {step.description}
+                                      </div>
                                     </div>
+
+                                    {/* Embedded SQL query if present in this step */}
+                                    {step.sql && (
+                                      <div className="border border-brand-border/60 bg-brand-dark/40 rounded-xl overflow-hidden max-w-xl">
+                                        <button
+                                          type="button"
+                                          onClick={() => setCollapsedSql(prev => ({ ...prev, [`${idx}_step_${sIdx}`]: !isStepSqlCollapsed }))}
+                                          className="w-full px-3 py-2 bg-brand-dark/60 hover:bg-brand-dark flex items-center justify-between border-b border-brand-border/40 text-left cursor-pointer transition-colors"
+                                        >
+                                          <div className="flex items-center gap-2 text-gray-400">
+                                            <Code className="w-3 h-3 text-brand-green" />
+                                            <span className="text-[9px] font-bold uppercase tracking-wider">Executed SQL</span>
+                                          </div>
+                                          <span className="text-[9px] text-gray-500 font-semibold">
+                                            {isStepSqlCollapsed ? 'Expand' : 'Collapse'}
+                                          </span>
+                                        </button>
+                                        {!isStepSqlCollapsed && (
+                                          <div className="p-2.5 bg-brand-dark/90 relative">
+                                            <button
+                                              type="button"
+                                              onClick={() => handleCopySql(1000 + idx * 100 + sIdx, step.sql || '')}
+                                              className="absolute top-2 right-2 p-1 bg-brand-panel hover:bg-brand-border border border-brand-border rounded-lg text-gray-400 hover:text-white transition-colors cursor-pointer"
+                                            >
+                                              {copiedSqlIndex === (1000 + idx * 100 + sIdx) ? (
+                                                <Check className="w-3 h-3 text-brand-green" />
+                                              ) : (
+                                                <Copy className="w-3 h-3" />
+                                              )}
+                                            </button>
+                                            <pre
+                                              className="text-[10px] font-mono text-gray-200 overflow-x-auto whitespace-pre-wrap pr-8"
+                                              dangerouslySetInnerHTML={{ __html: highlightSql(step.sql) }}
+                                            />
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+
+                                    {/* Embedded Table results if present in this step */}
+                                    {step.columns && step.rows && step.rows.length > 0 && (
+                                      <div className="border border-brand-border/60 bg-brand-dark/20 rounded-xl overflow-hidden max-w-xl">
+                                        <div className="overflow-x-auto max-h-48">
+                                          <table className="w-full text-left border-collapse text-[10px]">
+                                            <thead>
+                                              <tr className="bg-brand-dark/60 border-b border-brand-border/60">
+                                                {step.columns.map((col) => (
+                                                  <th key={col} className="p-2 text-gray-400 font-semibold tracking-wider uppercase text-[8px]">
+                                                    {col}
+                                                  </th>
+                                                ))}
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              {step.rows.map((row, rIdx) => (
+                                                <tr key={rIdx} className="border-b border-brand-border/30 hover:bg-brand-dark/40 transition-colors">
+                                                  {row.map((val, cIdx) => (
+                                                    <td key={cIdx} className="p-2 text-gray-200 max-w-xs truncate font-mono">
+                                                      {val === null || val === undefined ? (
+                                                        <span className="text-gray-600 font-sans italic">NULL</span>
+                                                      ) : (
+                                                        String(val)
+                                                      )}
+                                                    </td>
+                                                  ))}
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
-                                </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           </div>
                         )}
