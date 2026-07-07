@@ -229,6 +229,23 @@ def db_get_conversation_jdbc_url(conversation_id: str) -> Optional[str]:
         logger.error(f"Failed to get conversation JDBC URL: {e}")
     return None
 
+def db_get_conversation_title(conversation_id: str) -> Optional[str]:
+    """Retrieves the title of a conversation from the Neon database."""
+    if not settings.DATABASE_URL:
+        return None
+    try:
+        conn = psycopg2.connect(settings.DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("SELECT title FROM conversations WHERE id = %s", (conversation_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        if row:
+            return row[0]
+    except Exception as e:
+        logger.error(f"Failed to get conversation title: {e}")
+    return None
+
 def db_save_message(
     msg_id: str,
     conversation_id: str,

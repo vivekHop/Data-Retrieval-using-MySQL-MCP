@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { api } from '../api';
 import type { Message, UserSession } from '../types';
 import { Send, Loader2, Database, Code, Table2, BarChart3, Copy, Check, Download, AlertCircle, Sparkles, MessageSquare, RefreshCw, Trash2 } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
@@ -9,9 +8,9 @@ interface ChatWindowProps {
   activeConversationId: string | null;
   selectedDatabases: string[];
   messages: Message[];
-  onAddMessage: (msg: Message) => void;
-  loading: boolean;
-  setLoading: (l: boolean) => void;
+  onSendMessage: (text: string) => Promise<void>;
+  pipelineLoading: boolean;
+  pipelineSteps: { title: string; description: string; status: string }[];
   conversations: any[];
   connectionInfo: { connected: boolean; base_url: string | null; engine_type: string | null; database: string } | null;
   messagesLoading?: boolean;
@@ -24,9 +23,9 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   activeConversationId,
   selectedDatabases,
   messages,
-  onAddMessage,
-  loading,
-  setLoading,
+  onSendMessage,
+  pipelineLoading,
+  pipelineSteps,
   conversations,
   connectionInfo,
   messagesLoading = false,
@@ -39,109 +38,31 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   const [copiedSqlIndex, setCopiedSqlIndex] = useState<number | null>(null);
   const [copiedTableIndex, setCopiedTableIndex] = useState<number | null>(null);
+  const [copiedBlockIndex, setCopiedBlockIndex] = useState<string | null>(null);
   const [activeViews, setActiveViews] = useState<Record<number, 'table' | 'chart'>>({});
   const [collapsedSql, setCollapsedSql] = useState<Record<string | number, boolean>>({});
 
   const [chartTypes, setChartTypes] = useState<Record<number, 'bar' | 'line' | 'area'>>({});
 
-  // Real-time SSE timeline steps — populated as backend emits each step
-  const [liveSteps, setLiveSteps] = useState<{ title: string; description: string; status: string }[]>([]);
-  const [activeStepIndex, setActiveStepIndex] = useState<number>(-1);
+  const handleCopyBlockText = (key: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedBlockIndex(key);
+    setTimeout(() => setCopiedBlockIndex(null), 2000);
+  };
+
+  const activeStepIndex = pipelineSteps.length - 1;
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom whenever messages or steps change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading, liveSteps]);
+  }, [messages, pipelineLoading, pipelineSteps]);
 
   const handleSend = async (textToSend: string) => {
-    if (!textToSend.trim() || loading) return;
-
-    // 1. Immediately add the user message to the UI
-    const userMsg: Message = {
-      id: Math.random().toString(),
-      role: 'user',
-      text: textToSend,
-      timestamp: new Date().toISOString(),
-    };
-    onAddMessage(userMsg);
+    if (!textToSend.trim() || pipelineLoading) return;
     setInput('');
-    setLoading(true);
-
-    // 2. Reset live timeline
-    setLiveSteps([]);
-    setActiveStepIndex(-1);
-
-    const conversationId = activeConversationId || 'chat_session_' + session.username;
-
-    try {
-      let finalResult: any = null;
-      let errorMsg: string | null = null;
-
-      await api.askQuestionStream(
-        textToSend,
-        selectedDatabases.length > 0 ? selectedDatabases : undefined,
-        conversationId,
-        // onStep: push each step as it arrives from the backend
-        (step) => {
-          setLiveSteps(prev => {
-            const next = [...prev, { ...step, status: 'completed' }];
-            setActiveStepIndex(next.length - 1);
-            return next;
-          });
-        },
-        // onResult: build assistant message
-        (result) => { finalResult = result; },
-        // onError
-        (msg) => { errorMsg = msg; },
-      );
-
-      if (finalResult) {
-        const assistantMsg: Message = {
-          id: Math.random().toString(),
-          role: 'assistant',
-          text: finalResult.summary || 'Query executed successfully.',
-          sql: finalResult.sql,
-          columns: finalResult.columns,
-          rows: finalResult.rows,
-          executionTimeMs: finalResult.execution_time_ms,
-          rowCount: finalResult.row_count,
-          database: finalResult.database_used,
-          error: finalResult.error,
-          suggestedQuestions: finalResult.suggested_questions,
-          geminiCallsCount: finalResult.gemini_calls_count,
-          steps: finalResult.steps,
-          timestamp: new Date().toISOString(),
-        };
-        onAddMessage(assistantMsg);
-      } else {
-        const errMsg2: Message = {
-          id: Math.random().toString(),
-          role: 'assistant',
-          text: 'I encountered an error while processing your request.',
-          error: errorMsg || 'Unknown error from AI pipeline.',
-          timestamp: new Date().toISOString(),
-        };
-        onAddMessage(errMsg2);
-      }
-    } catch (err: any) {
-      const errMsg: Message = {
-        id: Math.random().toString(),
-        role: 'assistant',
-        text: 'I encountered an error while processing your request.',
-        error: err.message || 'Unknown connection error.',
-        timestamp: new Date().toISOString(),
-      };
-      onAddMessage(errMsg);
-    } finally {
-      setLoading(false);
-      // Keep the completed steps visible for a moment then clear
-      setTimeout(() => {
-        setLiveSteps([]);
-        setActiveStepIndex(-1);
-      }, 3000);
-    }
+    await onSendMessage(textToSend);
   };
 
 
@@ -259,33 +180,453 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
     return null;
   };
 
-  const renderSimpleMarkdown = (text: string) => {
-    // Basic formatting for double stars **bold**
+  const renderInlineMarkdown = (text: string): React.ReactNode => {
+    if (!text) return null;
+    const inlineRegex = /(\*\*\*.*?\*\*\*|___.*?___|\*\*.*?\*\*|__.*?__|`.*?`|\[.*?\]\(.*?\)|\*.*?\*|_.*?_)/g;
+    const parts = text.split(inlineRegex);
+
+    return (
+      <>
+        {parts.map((part, idx) => {
+          if (!part) return null;
+
+          // Bold-italic: ***text*** or ___text___
+          if ((part.startsWith('***') && part.endsWith('***')) || (part.startsWith('___') && part.endsWith('___'))) {
+            return (
+              <strong key={idx} className="font-bold text-white">
+                <em className="italic">{renderInlineMarkdown(part.slice(3, -3))}</em>
+              </strong>
+            );
+          }
+
+          // Bold: **text** or __text__
+          if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
+            return (
+              <strong key={idx} className="font-bold text-white">
+                {renderInlineMarkdown(part.slice(2, -2))}
+              </strong>
+            );
+          }
+
+          // Link: [text](url)
+          if (part.startsWith('[') && part.includes('](')) {
+            const match = part.match(/^\[(.*?)\]\((.*?)\)$/);
+            if (match) {
+              return (
+                <a
+                  key={idx}
+                  href={match[2]}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-brand-green hover:text-brand-green-hover hover:underline transition-colors font-medium"
+                >
+                  {renderInlineMarkdown(match[1])}
+                </a>
+              );
+            }
+          }
+
+          // Inline code: `text`
+          if (part.startsWith('`') && part.endsWith('`')) {
+            return (
+              <code key={idx} className="px-1.5 py-0.5 bg-brand-dark/80 border border-brand-border/60 rounded font-mono text-[11px] text-brand-green font-medium">
+                {part.slice(1, -1)}
+              </code>
+            );
+          }
+
+          // Italic: *text* or _text_
+          if ((part.startsWith('*') && part.endsWith('*')) || (part.startsWith('_') && part.endsWith('_'))) {
+            return (
+              <em key={idx} className="italic text-gray-300">
+                {renderInlineMarkdown(part.slice(1, -1))}
+              </em>
+            );
+          }
+
+          // Default text
+          return part;
+        })}
+      </>
+    );
+  };
+
+  interface MarkdownBlock {
+    type: 'paragraph' | 'header' | 'unordered-list' | 'ordered-list' | 'code' | 'table' | 'blockquote' | 'hr';
+    content: any[];
+    level?: number;
+    language?: string;
+  }
+
+  const parseMarkdownBlocks = (text: string): MarkdownBlock[] => {
     const lines = text.split('\n');
-    return lines.map((line, idx) => {
-      // Check if it's a bullet point
-      const isBullet = line.trim().startsWith('* ') || line.trim().startsWith('- ');
-      let content = line;
-      if (isBullet) {
-        content = line.trim().substring(2);
+    const blocks: MarkdownBlock[] = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // 1. Code Block
+      if (line.trim().startsWith('```')) {
+        const match = line.trim().match(/^```(\w*)/);
+        const language = match ? match[1] : '';
+        const codeLines: string[] = [];
+        i++;
+        while (i < lines.length && !lines[i].trim().startsWith('```')) {
+          codeLines.push(lines[i]);
+          i++;
+        }
+        if (i < lines.length) i++;
+        blocks.push({
+          type: 'code',
+          content: codeLines,
+          language
+        });
+        continue;
       }
 
-      // Regex replace **bold**
-      const formatted = content.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-
-      if (isBullet) {
-        return (
-          <li key={idx} className="ml-4 list-disc text-sm text-gray-300 leading-relaxed mb-1" dangerouslySetInnerHTML={{ __html: formatted }} />
-        );
+      // 2. Table
+      if (line.trim().startsWith('|') || (line.includes('|') && i + 1 < lines.length && lines[i+1].includes('|') && lines[i+1].includes('-'))) {
+        const tableLines: string[] = [];
+        while (i < lines.length && (lines[i].trim().startsWith('|') || lines[i].includes('|'))) {
+          if (lines[i].trim() === '') break;
+          tableLines.push(lines[i]);
+          i++;
+        }
+        blocks.push({
+          type: 'table',
+          content: tableLines
+        });
+        continue;
       }
-      return (
-        <p key={idx} className="text-sm text-gray-300 leading-relaxed mb-2.5" dangerouslySetInnerHTML={{ __html: formatted }} />
-      );
+
+      // 3. Blockquote
+      if (line.trim().startsWith('>')) {
+        const quoteLines: string[] = [];
+        while (i < lines.length && lines[i].trim().startsWith('>')) {
+          const cleanLine = lines[i].trim().replace(/^>\s*/, '');
+          quoteLines.push(cleanLine);
+          i++;
+        }
+        blocks.push({
+          type: 'blockquote',
+          content: quoteLines
+        });
+        continue;
+      }
+
+      // 4. Horizontal Rule
+      if (line.trim() === '---' || line.trim() === '***' || line.trim() === '___') {
+        blocks.push({
+          type: 'hr',
+          content: []
+        });
+        i++;
+        continue;
+      }
+
+      // 5. Headers
+      const headerMatch = line.match(/^(#{1,6})\s+(.*)$/);
+      if (headerMatch) {
+        blocks.push({
+          type: 'header',
+          level: headerMatch[1].length,
+          content: [headerMatch[2]]
+        });
+        i++;
+        continue;
+      }
+
+      // 6. Unordered List
+      const bulletMatch = line.match(/^(\s*)[*+-]\s+(.*)$/);
+      if (bulletMatch) {
+        const listItems: { text: string; indent: number }[] = [];
+        while (i < lines.length) {
+          const itemMatch = lines[i].match(/^(\s*)[*+-]\s+(.*)$/);
+          if (itemMatch) {
+            const indentSpaces = itemMatch[1]?.length || 0;
+            const indent = Math.floor(indentSpaces / 2);
+            listItems.push({ text: itemMatch[2], indent });
+            i++;
+          } else if (lines[i].trim() === '') {
+            let nextIdx = i + 1;
+            while (nextIdx < lines.length && lines[nextIdx].trim() === '') {
+              nextIdx++;
+            }
+            if (nextIdx < lines.length && lines[nextIdx].match(/^(\s*)[*+-]\s+(.*)$/)) {
+              i = nextIdx;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+        blocks.push({
+          type: 'unordered-list',
+          content: listItems
+        });
+        continue;
+      }
+
+      // 7. Ordered List
+      const numberedMatch = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      if (numberedMatch) {
+        const listItems: { text: string; indent: number; number: string }[] = [];
+        while (i < lines.length) {
+          const itemMatch = lines[i].match(/^(\s*)(\d+)\.\s+(.*)$/);
+          if (itemMatch) {
+            const indentSpaces = itemMatch[1]?.length || 0;
+            const indent = Math.floor(indentSpaces / 2);
+            listItems.push({ text: itemMatch[3], indent, number: itemMatch[2] });
+            i++;
+          } else if (lines[i].trim() === '') {
+            let nextIdx = i + 1;
+            while (nextIdx < lines.length && lines[nextIdx].trim() === '') {
+              nextIdx++;
+            }
+            if (nextIdx < lines.length && lines[nextIdx].match(/^(\s*)(\d+)\.\s+(.*)$/)) {
+              i = nextIdx;
+            } else {
+              break;
+            }
+          } else {
+            break;
+          }
+        }
+        blocks.push({
+          type: 'ordered-list',
+          content: listItems
+        });
+        continue;
+      }
+
+      // 8. Empty Line
+      if (line.trim() === '') {
+        i++;
+        continue;
+      }
+
+      // 9. Paragraph
+      const paraLines: string[] = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() !== '' &&
+        !lines[i].trim().startsWith('```') &&
+        !lines[i].trim().startsWith('|') &&
+        !lines[i].trim().startsWith('>') &&
+        lines[i].trim() !== '---' &&
+        lines[i].trim() !== '***' &&
+        lines[i].trim() !== '___' &&
+        !lines[i].match(/^(#{1,6})\s+(.*)$/) &&
+        !lines[i].match(/^(\s*)[*+-]\s+(.*)$/) &&
+        !lines[i].match(/^(\s*)(\d+)\.\s+(.*)$/)
+      ) {
+        paraLines.push(lines[i]);
+        i++;
+      }
+      blocks.push({
+        type: 'paragraph',
+        content: paraLines
+      });
+    }
+
+    return blocks;
+  };
+
+  const renderHeader = (block: MarkdownBlock, blockIdx: number) => {
+    const text = block.content[0] || '';
+    const renderedText = renderInlineMarkdown(text);
+    switch (block.level) {
+      case 1:
+        return <h1 key={blockIdx} className="text-xl font-bold text-white mt-5 mb-2.5 border-b border-brand-border/60 pb-1.5">{renderedText}</h1>;
+      case 2:
+        return <h2 key={blockIdx} className="text-lg font-bold text-white mt-4 mb-2 border-b border-brand-border/40 pb-1">{renderedText}</h2>;
+      case 3:
+        return <h3 key={blockIdx} className="text-base font-semibold text-white mt-3.5 mb-1.5">{renderedText}</h3>;
+      default:
+        return <h4 key={blockIdx} className="text-sm font-semibold text-white mt-3 mb-1">{renderedText}</h4>;
+    }
+  };
+
+  const renderCodeBlock = (block: MarkdownBlock, blockIdx: number) => {
+    const codeText = block.content.join('\n');
+    const isSql = block.language?.toLowerCase() === 'sql';
+    return (
+      <div key={blockIdx} className="my-4 border border-brand-border/60 bg-brand-dark/60 rounded-xl overflow-hidden shadow-sm">
+        <div className="px-3.5 py-1.5 bg-brand-dark/80 flex items-center justify-between border-b border-brand-border/40 text-[10px] text-gray-500 font-bold uppercase tracking-wider">
+          <span>{block.language || 'code'}</span>
+          <button
+            type="button"
+            onClick={() => handleCopyBlockText(`block_${blockIdx}`, codeText)}
+            className="text-gray-500 hover:text-white transition-colors cursor-pointer flex items-center gap-1 font-semibold"
+          >
+            {copiedBlockIndex === `block_${blockIdx}` ? (
+              <>
+                <Check className="w-3 h-3 text-brand-green" />
+                <span>Copied!</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3 h-3" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
+        </div>
+        {isSql ? (
+          <pre 
+            className="p-3 bg-brand-dark/95 text-gray-200 overflow-x-auto font-mono text-[11px] leading-relaxed"
+            dangerouslySetInnerHTML={{ __html: highlightSql(codeText) }}
+          />
+        ) : (
+          <pre className="p-3 bg-brand-dark/95 text-gray-200 overflow-x-auto font-mono text-[11px] leading-relaxed">
+            <code>{codeText}</code>
+          </pre>
+        )}
+      </div>
+    );
+  };
+
+  const renderTable = (lines: string[], blockIdx: number) => {
+    const cleanLines = lines.filter(l => l.trim() !== '');
+    if (cleanLines.length === 0) return null;
+
+    const parseRow = (rowText: string): string[] => {
+      let t = rowText.trim();
+      if (t.startsWith('|')) t = t.slice(1);
+      if (t.endsWith('|')) t = t.slice(0, -1);
+      return t.split('|').map(cell => cell.trim());
+    };
+
+    const headerCells = parseRow(cleanLines[0]);
+    let startIndex = 1;
+    if (cleanLines.length > 1 && cleanLines[1].includes('-')) {
+      startIndex = 2;
+    }
+
+    const rows: string[][] = [];
+    for (let r = startIndex; r < cleanLines.length; r++) {
+      const parsed = parseRow(cleanLines[r]);
+      while (parsed.length < headerCells.length) {
+        parsed.push('');
+      }
+      rows.push(parsed);
+    }
+
+    return (
+      <div key={blockIdx} className="my-4 overflow-x-auto border border-brand-border rounded-xl bg-brand-panel/30 shadow-sm max-w-full">
+        <table className="w-full text-left border-collapse text-xs">
+          <thead>
+            <tr className="bg-brand-dark/50 border-b border-brand-border/60">
+              {headerCells.map((cell, cIdx) => (
+                <th key={cIdx} className="p-3 text-brand-green font-bold tracking-wider uppercase text-[10px]">
+                  {renderInlineMarkdown(cell)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, rIdx) => (
+              <tr key={rIdx} className="border-b border-brand-border/30 hover:bg-brand-dark/20 transition-colors">
+                {row.map((cell, cIdx) => (
+                  <td key={cIdx} className="p-3 text-gray-200">
+                    {renderInlineMarkdown(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  const renderBlockquote = (block: MarkdownBlock, blockIdx: number) => {
+    const text = block.content.join('\n');
+    return (
+      <blockquote key={blockIdx} className="border-l-4 border-brand-green pl-4 my-3 italic text-gray-400">
+        {renderInlineMarkdown(text)}
+      </blockquote>
+    );
+  };
+
+  const renderUnorderedList = (items: { text: string; indent: number }[], blockIdx: number) => {
+    return (
+      <ul key={blockIdx} className="list-disc pl-5 my-3 space-y-1">
+        {items.map((item, idx) => (
+          <li
+            key={idx}
+            style={{
+              marginLeft: `${item.indent * 16}px`,
+              listStyleType: item.indent === 0 ? 'disc' : item.indent === 1 ? 'circle' : 'square'
+            }}
+            className="text-sm text-gray-300 leading-relaxed animate-slide-in"
+          >
+            {renderInlineMarkdown(item.text)}
+          </li>
+        ))}
+      </ul>
+    );
+  };
+
+  const renderOrderedList = (items: { text: string; indent: number; number: string }[], blockIdx: number) => {
+    return (
+      <ol key={blockIdx} className="list-decimal pl-5 my-3 space-y-1">
+        {items.map((item, idx) => (
+          <li
+            key={idx}
+            style={{
+              marginLeft: `${item.indent * 16}px`
+            }}
+            className="text-sm text-gray-300 leading-relaxed animate-slide-in"
+          >
+            {renderInlineMarkdown(item.text)}
+          </li>
+        ))}
+      </ol>
+    );
+  };
+
+  const renderParagraph = (block: MarkdownBlock, blockIdx: number) => {
+    const text = block.content.join('\n');
+    return (
+      <p key={blockIdx} className="text-sm text-gray-300 leading-relaxed mb-2.5">
+        {renderInlineMarkdown(text)}
+      </p>
+    );
+  };
+
+  const renderSimpleMarkdown = (text: string) => {
+    if (!text) return null;
+
+    const blocks = parseMarkdownBlocks(text);
+    const renderedElements = blocks.map((block, idx) => {
+      switch (block.type) {
+        case 'header':
+          return renderHeader(block, idx);
+        case 'code':
+          return renderCodeBlock(block, idx);
+        case 'table':
+          return renderTable(block.content, idx);
+        case 'blockquote':
+          return renderBlockquote(block, idx);
+        case 'hr':
+          return <hr key={idx} className="border-brand-border/60 my-4" />;
+        case 'unordered-list':
+          return renderUnorderedList(block.content, idx);
+        case 'ordered-list':
+          return renderOrderedList(block.content, idx);
+        case 'paragraph':
+        default:
+          return renderParagraph(block, idx);
+      }
     });
+
+    return <div className="space-y-3">{renderedElements}</div>;
   };
 
   const highlightSql = (sql: string) => {
-    // Very simple syntax highlighting for display
     const keywords = [
       'SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'GROUP BY', 'ORDER BY', 
       'LIMIT', 'WITH', 'AS', 'AND', 'OR', 'SUM', 'COUNT', 'AVG', 'LEFT JOIN', 'INNER JOIN'
@@ -326,7 +667,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               title="Reload all messages for this chat"
               className="px-3 py-1.5 bg-brand-dark hover:bg-brand-border border border-brand-border rounded-xl text-gray-400 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-[10px] font-bold"
             >
-              <RefreshCw className={`w-3 h-3 ${loading || messagesLoading ? 'animate-spin text-brand-green' : ''}`} />
+              <RefreshCw className={`w-3 h-3 ${pipelineLoading || messagesLoading ? 'animate-spin text-brand-green' : ''}`} />
               Sync Messages
             </button>
           </div>
@@ -765,11 +1106,17 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                                 return (
                                   <div key={sIdx} className="relative group/step space-y-2">
                                     {/* Bullet point node */}
-                                    <div className="absolute -left-[26.5px] top-1.5 w-3 h-3 rounded-full bg-brand-dark border-2 border-brand-green flex items-center justify-center shadow-md">
-                                      <div className="w-1 h-1 rounded-full bg-brand-green" />
+                                    <div className={`absolute -left-[26.5px] top-1.5 w-3 h-3 rounded-full bg-brand-dark border-2 flex items-center justify-center shadow-md ${
+                                      step.status === 'error' ? 'border-red-500' : 'border-brand-green'
+                                    }`}>
+                                      <div className={`w-1 h-1 rounded-full ${
+                                        step.status === 'error' ? 'bg-red-500' : 'bg-brand-green'
+                                      }`} />
                                     </div>
                                     <div className="space-y-0.5">
-                                      <div className="font-semibold text-gray-200 group-hover/step:text-brand-green transition-colors">
+                                      <div className={`font-semibold transition-colors ${
+                                        step.status === 'error' ? 'text-red-400 group-hover/step:text-red-300' : 'text-gray-200 group-hover/step:text-brand-green'
+                                      }`}>
                                         {step.title}
                                       </div>
                                       <div className="text-gray-400 leading-normal font-mono text-[10px]">
@@ -884,19 +1231,18 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
             );
           })
         )}
-
         {/* ── Real-time SSE Timeline ──────────────────────────────────────── */}
-        {loading && liveSteps.length > 0 && (
-          <div className="flex gap-4 justify-start">
+        {pipelineLoading && pipelineSteps.length > 0 && (
+          <div className="flex gap-4 justify-start max-w-full">
             <div className="w-8 h-8 rounded-lg bg-brand-green/10 border border-brand-green/20 flex items-center justify-center shrink-0 text-brand-green mt-1">
               <Loader2 className="w-4 h-4 animate-spin" />
             </div>
-            <div className="flex-1 bg-brand-panel border border-brand-border rounded-2xl p-5 shadow-md space-y-4">
+            <div className="flex-1 bg-brand-panel border border-brand-border rounded-2xl p-5 shadow-md space-y-4 min-w-0 max-w-full overflow-hidden">
               {/* Header */}
               <div className="flex items-center justify-between border-b border-brand-border/40 pb-2">
                 <span className="text-xs font-semibold text-brand-green flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-brand-green animate-ping" />
-                  {liveSteps[activeStepIndex]?.title ?? 'Processing…'}
+                  {pipelineSteps[activeStepIndex]?.title ?? 'Processing…'}
                 </span>
                 <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Agent Pipeline</span>
               </div>
@@ -904,7 +1250,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               {/* Horizontal delivery-style timeline */}
               <div className="w-full py-2 overflow-x-auto">
                 <div className="flex items-center min-w-max px-2 gap-0">
-                  {liveSteps.map((step, sIdx) => {
+                  {pipelineSteps.map((step, sIdx) => {
                     const isActive = sIdx === activeStepIndex;
                     const isCompleted = sIdx < activeStepIndex;
                     const isError = step.status === 'error';
@@ -940,7 +1286,7 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                         </div>
 
                         {/* Connector line */}
-                        {sIdx < liveSteps.length - 1 && (
+                        {sIdx < pipelineSteps.length - 1 && (
                           <div className={`h-[2px] flex-1 mx-1 transition-colors duration-500 ${
                             sIdx < activeStepIndex ? 'bg-brand-green shadow-[0_0_6px_rgba(16,185,129,0.4)]' : 'bg-brand-border'
                           }`} style={{ minWidth: '24px', maxWidth: '48px' }} />
@@ -985,13 +1331,13 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
               }
             }}
             rows={1}
-            disabled={loading || !!isUrlMismatch}
+            disabled={pipelineLoading || !!isUrlMismatch}
             className="w-full pl-4 pr-12 py-3.5 bg-brand-dark/80 border border-brand-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-brand-green focus:ring-1 focus:ring-brand-green/20 transition-all text-sm resize-none disabled:opacity-40"
           />
 
           <button
             type="submit"
-            disabled={loading || !input.trim() || !!isUrlMismatch}
+            disabled={pipelineLoading || !input.trim() || !!isUrlMismatch}
             className="absolute right-3.5 p-2 bg-brand-green hover:bg-brand-green-hover text-brand-dark disabled:opacity-30 disabled:hover:bg-brand-green rounded-lg transition-colors cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />

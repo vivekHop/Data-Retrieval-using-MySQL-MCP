@@ -60,7 +60,7 @@ def validate_and_limit_sql(sql_query: str) -> str:
     if SQLGLOT_AVAILABLE:
         try:
             # Determine dialect dynamically
-            from backend.app.db import db_manager
+            from app.db import db_manager
             dialect = "postgres" if db_manager.engine_type == "postgres" else "mysql"
             
             # Parse the query using correct dialect

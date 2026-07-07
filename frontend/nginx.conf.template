@@ -15,6 +15,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # SSE (Server-Sent Events) support
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+
         # WebSocket support
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;

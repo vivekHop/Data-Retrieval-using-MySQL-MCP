@@ -19,6 +19,7 @@ interface SidebarProps {
   connectionInfo: { connected: boolean; base_url: string | null; engine_type: string | null; database: string } | null;
   onConnectSuccess: (info: any) => void;
   onOpenConnectionModal: () => void;
+  runningPipelines?: Record<string, boolean>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -37,6 +38,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   connectionInfo,
   onConnectSuccess,
   onOpenConnectionModal,
+  runningPipelines = {},
 }) => {
   const [activeTab, setActiveTab] = useState<'chats' | 'schema'>('chats');
   const [searchQuery, setSearchQuery] = useState('');
@@ -219,6 +221,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                           <div className="flex items-center gap-2 min-w-0">
                             {switchingConversationId === chat.id ? (
                               <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-green shrink-0" />
+                            ) : runningPipelines[chat.id] ? (
+                              <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                                <span className="relative flex h-2 w-2">
+                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-green opacity-75"></span>
+                                  <span className="relative inline-flex rounded-full h-2 w-2 bg-brand-green"></span>
+                                </span>
+                              </div>
                             ) : (
                               <MessageSquare className={`w-3.5 h-3.5 shrink-0 ${
                                 activeConversationId === chat.id ? 'text-brand-green' : 'text-gray-500'

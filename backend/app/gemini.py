@@ -11,7 +11,8 @@ from app.logger import (
     log_query,
     db_save_conversation,
     db_save_message,
-    db_get_messages
+    db_get_messages,
+    db_get_conversation_title
 )
 
 logger = logging.getLogger(__name__)
@@ -79,12 +80,12 @@ To do this, you MUST follow these steps:
 3. If necessary, call `get_relationships` to find foreign key relationships.
 4. Construct a read-only SELECT SQL query. Do not execute destructive queries (INSERT, UPDATE, DELETE, etc.).
 5. Execute the query using `execute_select`.
-6. Explain the results in concise, user-friendly business language.
+6. Explain the results in user-friendly business language.
 
 Rules:
 - Never make assumptions about table names or columns. Always inspect schemas first!
 - Always qualify table names with the database prefix in your SQL queries (e.g., `sales.customers`).
-- Return the explanation in clear business terms. Keep it concise.
+- Format your response for maximum readability. You are encouraged to use rich markdown formatting where appropriate to make it look professional (e.g. headers, bold text, bullet points or numbered lists, inline code, blockquotes, horizontal lines, or markdown tables for data summaries). Do not feel constrained by a single format—choose whichever format best presents the requested database information.
 - If you encounter an error (e.g., table not found), try checking the schema again, correcting the query, and re-running.
 """
 
@@ -142,221 +143,300 @@ async def run_gemini_tool_loop_streaming(
 
     timeline_steps: List[Dict[str, Any]] = []
     gemini_calls_count = 0
+    executed_sqls: List[str] = []
+    used_databases = set()
+    total_sql_time = 0.0
+
+    conv_title = db_get_conversation_title(conversation_id)
+    display_user = conv_title if conv_title else username
 
     def emit_step(title: str, description: str, status: str = "completed", **kwargs) -> Dict[str, Any]:
         step = {"title": title, "description": description, "status": status, **kwargs}
         timeline_steps.append(step)
         return step
 
-    # Step 1: Query received
-    step = emit_step("Query Submitted", f'User asked: "{user_prompt[:80]}"')
-    yield _sse("step", step)
+    try:
+        # Step 1: Query received
+        step = emit_step("Query Submitted", f'User asked: "{user_prompt[:80]}"')
+        yield _sse("step", step)
 
-    # Load conversation history from Neon
-    past_messages = db_get_messages(conversation_id)
-    history = []
-    for msg in past_messages:
-        role = "user" if msg["role"] == "user" else "model"
-        history.append({"role": role, "parts": [{"text": msg["text"]}]})
+        # Load conversation history from Neon
+        past_messages = db_get_messages(conversation_id)
+        history = []
+        for msg in past_messages:
+            role = "user" if msg["role"] == "user" else "model"
+            history.append({"role": role, "parts": [{"text": msg["text"]}]})
 
-    # Save user message to DB immediately (so it's persisted even if AI fails)
-    user_msg_id = str(uuid.uuid4())
-    db_save_conversation(conversation_id, user_prompt[:50], username)
-    db_save_message(user_msg_id, conversation_id, "user", user_prompt)
+        # Save user message to DB immediately (so it's persisted even if AI fails)
+        user_msg_id = str(uuid.uuid4())
+        db_save_conversation(conversation_id, user_prompt[:50], username)
+        db_save_message(user_msg_id, conversation_id, "user", user_prompt)
 
-    # Append the new user prompt
-    history.append({"role": "user", "parts": [{"text": user_prompt}]})
+        # Append the new user prompt
+        history.append({"role": "user", "parts": [{"text": user_prompt}]})
 
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}"
-    )
-    headers = {"Content-Type": "application/json"}
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{settings.GEMINI_MODEL}:generateContent?key={settings.GEMINI_API_KEY}"
+        )
+        headers = {"Content-Type": "application/json"}
 
-    last_sql = None
-    last_db = None
-    last_exec_time = 0.0
-    last_row_count = 0
-    last_columns: List[str] = []
-    last_rows: List[List[Any]] = []
-    last_error = None
+        last_sql = None
+        last_db = None
+        last_exec_time = 0.0
+        last_row_count = 0
+        last_columns: List[str] = []
+        last_rows: List[List[Any]] = []
+        last_error = None
 
-    # Step 2: Contacting AI
-    step = emit_step("Contacting Gemini AI", "Sending conversation history to Gemini for reasoning…")
-    yield _sse("step", step)
+        # Step 2: Contacting AI
+        step = emit_step("Contacting Gemini AI", "Sending conversation history to Gemini for reasoning…")
+        yield _sse("step", step)
 
-    for turn in range(8):
-        payload = {
-            "contents": history,
-            "tools": GEMINI_TOOLS,
-            "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
-        }
+        for turn in range(8):
+            payload = {
+                "contents": history,
+                "tools": GEMINI_TOOLS,
+                "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+            }
 
-        gemini_calls_count += 1
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(url, json=payload, headers=headers, timeout=45.0)
-                response.raise_for_status()
-                res_data = response.json()
-            except Exception as e:
-                err_msg = str(e)
-                if hasattr(e, "response") and e.response:
-                    err_msg += f" — {e.response.text}"
-                step = emit_step("API Request Failed", f"Gemini API error: {err_msg}", "error")
-                yield _sse("step", step)
+            gemini_calls_count += 1
+            async with httpx.AsyncClient() as client:
+                try:
+                    response = await client.post(url, json=payload, headers=headers, timeout=45.0)
+                    response.raise_for_status()
+                    res_data = response.json()
+                except Exception as e:
+                    err_msg = str(e)
+                    if hasattr(e, "response") and e.response:
+                        err_msg += f" — {e.response.text}"
+                    step = emit_step("API Request Failed", f"Gemini API error: {err_msg}", "error")
+                    yield _sse("step", step)
 
-                # Persist error assistant message
-                asst_msg_id = str(uuid.uuid4())
-                db_save_message(
-                    asst_msg_id, conversation_id, "assistant",
-                    f"Gemini API Error: {err_msg}",
-                    error_message=err_msg, steps=timeline_steps,
-                    gemini_calls_count=gemini_calls_count
+                    # Persist error assistant message
+                    asst_msg_id = str(uuid.uuid4())
+                    db_save_message(
+                        asst_msg_id, conversation_id, "assistant",
+                        f"Gemini API Error: {err_msg}",
+                        error_message=err_msg, steps=timeline_steps,
+                        gemini_calls_count=gemini_calls_count
+                    )
+                    log_query(
+                        user_id=display_user,
+                        question=user_prompt,
+                        generated_sql=json.dumps(executed_sqls) if executed_sqls else last_sql,
+                        database_used=", ".join(sorted(used_databases)) if used_databases else last_db,
+                        execution_time_ms=total_sql_time,
+                        status="FAILURE",
+                        error_message=f"Gemini API Error: {err_msg}"
+                    )
+                    yield _sse("error", {"message": f"Gemini API Error: {err_msg}", "steps": timeline_steps})
+                    return
+
+            candidates = res_data.get("candidates", [])
+            if not candidates:
+                log_query(
+                    user_id=display_user,
+                    question=user_prompt,
+                    generated_sql=json.dumps(executed_sqls) if executed_sqls else last_sql,
+                    database_used=", ".join(sorted(used_databases)) if used_databases else last_db,
+                    execution_time_ms=total_sql_time,
+                    status="FAILURE",
+                    error_message="Gemini returned no candidates."
                 )
-                yield _sse("error", {"message": f"Gemini API Error: {err_msg}", "steps": timeline_steps})
+                yield _sse("error", {"message": "Gemini returned no candidates.", "steps": timeline_steps})
                 return
 
-        candidates = res_data.get("candidates", [])
-        if not candidates:
-            yield _sse("error", {"message": "Gemini returned no candidates.", "steps": timeline_steps})
-            return
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            history.append(content)
 
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-        history.append(content)
+            function_calls = [p.get("functionCall") for p in parts if "functionCall" in p]
 
-        function_calls = [p.get("functionCall") for p in parts if "functionCall" in p]
+            if not function_calls:
+                # ── Final text response ───────────────────────────────────────────
+                final_text = "".join(p.get("text", "") for p in parts if "text" in p)
 
-        if not function_calls:
-            # ── Final text response ───────────────────────────────────────────
-            final_text = "".join(p.get("text", "") for p in parts if "text" in p)
+                step = emit_step("Synthesis & Response", f"Gemini synthesized the results into a business explanation. (Made {gemini_calls_count} Gemini calls)")
+                yield _sse("step", step)
 
-            step = emit_step("Synthesis & Response", f"Gemini synthesized the results into a business explanation. (Made {gemini_calls_count} Gemini calls)")
-            yield _sse("step", step)
+                # Suggested follow-up questions
+                suggested = await generate_suggested_questions(user_prompt, final_text)
 
-            # Suggested follow-up questions
-            suggested = await generate_suggested_questions(user_prompt, final_text)
+                # Persist assistant message with full timeline and results
+                asst_msg_id = str(uuid.uuid4())
+                db_save_message(
+                    msg_id=asst_msg_id,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    text=final_text,
+                    sql=last_sql,
+                    columns=last_columns,
+                    rows=last_rows,
+                    execution_time_ms=last_exec_time,
+                    row_count=last_row_count,
+                    database_used=last_db,
+                    error_message=last_error,
+                    suggested_questions=suggested,
+                    steps=timeline_steps,
+                    gemini_calls_count=gemini_calls_count
+                )
 
-            # Persist assistant message with full timeline and results
-            asst_msg_id = str(uuid.uuid4())
+                log_query(
+                    user_id=display_user,
+                    question=user_prompt,
+                    generated_sql=json.dumps(executed_sqls) if executed_sqls else last_sql,
+                    database_used=", ".join(sorted(used_databases)) if used_databases else last_db,
+                    execution_time_ms=total_sql_time,
+                    status="SUCCESS" if not last_error else "FAILURE",
+                    error_message=last_error,
+                )
+
+                result_payload = {
+                    "success": True,
+                    "summary": final_text,
+                    "sql": last_sql,
+                    "columns": last_columns,
+                    "rows": last_rows,
+                    "execution_time_ms": last_exec_time,
+                    "row_count": last_row_count,
+                    "database_used": last_db,
+                    "error": last_error,
+                    "suggested_questions": suggested,
+                    "steps": timeline_steps,
+                    "gemini_calls_count": gemini_calls_count
+                }
+                yield _sse("result", result_payload)
+                return
+
+            # ── Handle tool calls ─────────────────────────────────────────────────
+            function_responses_parts = []
+            for fc in function_calls:
+                call_name = fc.get("name")
+                call_args = fc.get("args", {})
+
+                # Emit step BEFORE executing (so UI shows it as "in progress")
+                step_desc = f"Args: {json.dumps(call_args)}" if call_args else "No arguments."
+                step = emit_step(f"Tool Call: {call_name}", step_desc)
+                yield _sse("step", step)
+
+                try:
+                    tool_result = execute_tool_call(call_name, call_args, selected_databases)
+                except Exception as e:
+                    logger.error(f"Tool error {call_name}: {e}")
+                    tool_result = {"error": str(e), "success": False}
+
+                # Capture SQL execution stats
+                if call_name == "execute_select":
+                    last_sql = call_args.get("sql")
+                    if last_sql:
+                        executed_sqls.append(last_sql)
+                    # Extract the DB name from the SQL (qualified table reference)
+                    db_match = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\.', last_sql or "", re.IGNORECASE)
+                    last_db = db_match.group(1).lower() if db_match else "unknown"
+                    if last_db:
+                        used_databases.add(last_db)
+
+                    if tool_result.get("success"):
+                        last_columns = tool_result.get("columns", [])
+                        last_rows = tool_result.get("rows", [])
+                        last_exec_time = tool_result.get("execution_time_ms", 0.0)
+                        total_sql_time += last_exec_time
+                        last_row_count = tool_result.get("row_count", 0)
+                        last_error = None
+                        step = emit_step(
+                            "SQL Executed ✓",
+                            f"Returned {last_row_count} rows in {last_exec_time:.1f}ms.",
+                            sql=last_sql,
+                            columns=last_columns,
+                            rows=last_rows,
+                            execution_time_ms=last_exec_time,
+                            row_count=last_row_count,
+                            database=last_db
+                        )
+                    else:
+                        last_error = tool_result.get("error")
+                        step = emit_step(
+                            "SQL Execution Failed",
+                            f"Error: {last_error}",
+                            "error",
+                            sql=last_sql,
+                            error=last_error,
+                            database=last_db
+                        )
+                    yield _sse("step", step)
+
+                function_responses_parts.append({
+                    "functionResponse": {
+                        "name": call_name,
+                        "response": {"result": tool_result}
+                    }
+                })
+
+            history.append({"role": "function", "parts": function_responses_parts})
+
+        # Max turns exceeded
+        err_text = "AI exceeded maximum reasoning turns without returning a final response."
+        step = emit_step("Coordinator Limit Reached", "Maximum loop iterations reached.", "error")
+        yield _sse("step", step)
+
+        asst_msg_id = str(uuid.uuid4())
+        db_save_message(
+            asst_msg_id, conversation_id, "assistant",
+            err_text, sql=last_sql, error_message=err_text, steps=timeline_steps,
+            gemini_calls_count=gemini_calls_count
+        )
+        log_query(
+            user_id=display_user,
+            question=user_prompt,
+            generated_sql=json.dumps(executed_sqls) if executed_sqls else last_sql,
+            database_used=", ".join(sorted(used_databases)) if used_databases else last_db,
+            execution_time_ms=total_sql_time,
+            status="FAILURE",
+            error_message=err_text
+        )
+
+        yield _sse("error", {"message": err_text, "steps": timeline_steps})
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"AI Pipeline Burst: {e}\n{tb}")
+
+        # Emit failed step
+        step_err = emit_step("Pipeline Failed", f"Exception: {str(e)}", "error")
+        yield _sse("step", step_err)
+
+        # Save assistant error message in DB
+        asst_msg_id = str(uuid.uuid4())
+        error_msg_full = f"AI Pipeline Burst: {str(e)}\n\nTraceback:\n{tb}"
+        
+        try:
             db_save_message(
-                msg_id=asst_msg_id,
-                conversation_id=conversation_id,
-                role="assistant",
-                text=final_text,
-                sql=last_sql,
-                columns=last_columns,
-                rows=last_rows,
-                execution_time_ms=last_exec_time,
-                row_count=last_row_count,
-                database_used=last_db,
-                error_message=last_error,
-                suggested_questions=suggested,
+                asst_msg_id, conversation_id, "assistant",
+                "I encountered an error while processing your request.",
+                sql=last_sql if 'last_sql' in locals() else None,
+                error_message=error_msg_full,
                 steps=timeline_steps,
                 gemini_calls_count=gemini_calls_count
             )
+        except Exception as db_err:
+            logger.error(f"Failed to save error message to Neon DB: {db_err}")
 
+        try:
             log_query(
-                user_id=username,
+                user_id=display_user,
                 question=user_prompt,
-                generated_sql=last_sql,
-                database_used=last_db,
-                execution_time_ms=last_exec_time,
-                status="SUCCESS" if not last_error else "FAILURE",
-                error_message=last_error,
+                generated_sql=json.dumps(executed_sqls) if 'executed_sqls' in locals() and executed_sqls else (last_sql if 'last_sql' in locals() else None),
+                database_used=", ".join(sorted(used_databases)) if 'used_databases' in locals() and used_databases else (last_db if 'last_db' in locals() else None),
+                execution_time_ms=total_sql_time if 'total_sql_time' in locals() else 0.0,
+                status="FAILURE",
+                error_message=f"AI Pipeline Burst: {str(e)}"
             )
+        except Exception as log_err:
+            logger.error(f"Failed to write failure log to audit trail: {log_err}")
 
-            result_payload = {
-                "success": True,
-                "summary": final_text,
-                "sql": last_sql,
-                "columns": last_columns,
-                "rows": last_rows,
-                "execution_time_ms": last_exec_time,
-                "row_count": last_row_count,
-                "database_used": last_db,
-                "error": last_error,
-                "suggested_questions": suggested,
-                "steps": timeline_steps,
-                "gemini_calls_count": gemini_calls_count
-            }
-            yield _sse("result", result_payload)
-            return
-
-        # ── Handle tool calls ─────────────────────────────────────────────────
-        function_responses_parts = []
-        for fc in function_calls:
-            call_name = fc.get("name")
-            call_args = fc.get("args", {})
-
-            # Emit step BEFORE executing (so UI shows it as "in progress")
-            step_desc = f"Args: {json.dumps(call_args)}" if call_args else "No arguments."
-            step = emit_step(f"Tool Call: {call_name}", step_desc)
-            yield _sse("step", step)
-
-            try:
-                tool_result = execute_tool_call(call_name, call_args, selected_databases)
-            except Exception as e:
-                logger.error(f"Tool error {call_name}: {e}")
-                tool_result = {"error": str(e), "success": False}
-
-            # Capture SQL execution stats
-            if call_name == "execute_select":
-                last_sql = call_args.get("sql")
-                # Extract the DB name from the SQL (qualified table reference)
-                db_match = re.search(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\.', last_sql or "", re.IGNORECASE)
-                last_db = db_match.group(1).lower() if db_match else "unknown"
-
-                if tool_result.get("success"):
-                    last_columns = tool_result.get("columns", [])
-                    last_rows = tool_result.get("rows", [])
-                    last_exec_time = tool_result.get("execution_time_ms", 0.0)
-                    last_row_count = tool_result.get("row_count", 0)
-                    last_error = None
-                    step = emit_step(
-                        "SQL Executed ✓",
-                        f"Returned {last_row_count} rows in {last_exec_time:.1f}ms.",
-                        sql=last_sql,
-                        columns=last_columns,
-                        rows=last_rows,
-                        execution_time_ms=last_exec_time,
-                        row_count=last_row_count,
-                        database=last_db
-                    )
-                else:
-                    last_error = tool_result.get("error")
-                    step = emit_step(
-                        "SQL Execution Failed",
-                        f"Error: {last_error}",
-                        "error",
-                        sql=last_sql,
-                        error=last_error,
-                        database=last_db
-                    )
-                yield _sse("step", step)
-
-            function_responses_parts.append({
-                "functionResponse": {
-                    "name": call_name,
-                    "response": {"result": tool_result}
-                }
-            })
-
-        history.append({"role": "function", "parts": function_responses_parts})
-
-    # Max turns exceeded
-    err_text = "AI exceeded maximum reasoning turns without returning a final response."
-    step = emit_step("Coordinator Limit Reached", "Maximum loop iterations reached.", "error")
-    yield _sse("step", step)
-
-    asst_msg_id = str(uuid.uuid4())
-    db_save_message(
-        asst_msg_id, conversation_id, "assistant",
-        err_text, sql=last_sql, error_message=err_text, steps=timeline_steps,
-        gemini_calls_count=gemini_calls_count
-    )
-
-    yield _sse("error", {"message": err_text, "steps": timeline_steps})
+        yield _sse("error", {"message": f"AI Pipeline Burst: {str(e)}", "steps": timeline_steps})
 
 
 async def generate_suggested_questions(question: str, final_response: str) -> List[str]:

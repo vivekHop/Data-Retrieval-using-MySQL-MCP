@@ -299,6 +299,24 @@ class DatabaseManager:
     def execute_query(
         self, sql_query: str
     ) -> Tuple[List[str], List[List[Any]], float]:
+        import datetime
+        import decimal
+
+        def sanitize_value(v: Any) -> Any:
+            if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
+                return v.isoformat()
+            elif isinstance(v, decimal.Decimal):
+                try:
+                    return float(v)
+                except:
+                    return str(v)
+            elif isinstance(v, (bytes, bytearray)):
+                try:
+                    return v.decode("utf-8", errors="replace")
+                except:
+                    return str(v)
+            return v
+
         conn = self.get_connection()
         cursor = conn.cursor()
         start = time.time()
@@ -315,7 +333,10 @@ class DatabaseManager:
             if cursor.description:
                 rows = cursor.fetchall()
                 columns = [d[0] for d in cursor.description]
-                return columns, [list(r) for r in rows], (time.time() - start) * 1000
+                sanitized_rows = []
+                for r in rows:
+                    sanitized_rows.append([sanitize_value(cell) for cell in r])
+                return columns, sanitized_rows, (time.time() - start) * 1000
             return [], [], (time.time() - start) * 1000
         except Exception as e:
             logger.error(f"Query execution error: {e}")

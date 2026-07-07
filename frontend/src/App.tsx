@@ -28,8 +28,11 @@ export const App: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [switchingConversationId, setSwitchingConversationId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
   const [isAuditLogsOpen, setIsAuditLogsOpen] = useState(false);
+
+  // ── Pipeline execution state ──────────────────────────────────────────────
+  const [pipelineLoading, setPipelineLoading] = useState<Record<string, boolean>>({});
+  const [pipelineSteps, setPipelineSteps] = useState<Record<string, any[]>>({});
 
   // ── Connection / modal state ──────────────────────────────────────────────
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
@@ -177,15 +180,125 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleAddMessage = (msg: Message) => {
-    if (!activeConversationId) return;
-    setMessages(prev => [...prev, msg]);
-    if (msg.role === 'user' && messages.length === 0) {
-      const title = msg.text.length > 30 ? `${msg.text.substring(0, 30)}…` : msg.text;
+  const handleSendMessage = async (textToSend: string) => {
+    if (!textToSend.trim() || !activeConversationId) return;
+
+    const targetConversationId = activeConversationId;
+
+    // 1. Create and add user message locally
+    const userMsg: Message = {
+      id: Math.random().toString(),
+      role: 'user',
+      text: textToSend,
+      timestamp: new Date().toISOString(),
+    };
+
+    // Append to current messages if the user is still on this conversation
+    if (activeConversationId === targetConversationId) {
+      setMessages(prev => [...prev, userMsg]);
+    }
+
+    // Update conversation title if this is the first message
+    const isFirstMessage = messages.length === 0;
+    if (isFirstMessage) {
+      const title = textToSend.length > 30 ? `${textToSend.substring(0, 30)}…` : textToSend;
       setConversations(prev =>
-        prev.map(c => c.id === activeConversationId ? { ...c, title } : c)
+        prev.map(c => c.id === targetConversationId ? { ...c, title } : c)
       );
-      api.updateConversation(activeConversationId, title).catch(console.error);
+      api.updateConversation(targetConversationId, title).catch(console.error);
+    }
+
+    // 2. Mark this conversation as running a pipeline
+    setPipelineLoading(prev => ({ ...prev, [targetConversationId]: true }));
+    setPipelineSteps(prev => ({ ...prev, [targetConversationId]: [] }));
+
+    const accumulatedSteps: any[] = [];
+
+    try {
+      let finalResult: any = null;
+      let errorMsg: string | null = null;
+
+      await api.askQuestionStream(
+        textToSend,
+        selectedDatabases.length > 0 ? selectedDatabases : undefined,
+        targetConversationId,
+        // onStep: push each step as it arrives from the backend
+        (step) => {
+          const stepWithStatus = { ...step, status: step.status || 'completed' };
+          accumulatedSteps.push(stepWithStatus);
+          setPipelineSteps(prev => ({
+            ...prev,
+            [targetConversationId]: [...accumulatedSteps]
+          }));
+        },
+        // onResult: build assistant message
+        (result) => { finalResult = result; },
+        // onError
+        (msg) => { errorMsg = msg; },
+      );
+
+      // Construct assistant response message
+      let assistantMsg: Message;
+      if (finalResult) {
+        assistantMsg = {
+          id: Math.random().toString(),
+          role: 'assistant',
+          text: finalResult.summary || 'Query executed successfully.',
+          sql: finalResult.sql,
+          columns: finalResult.columns,
+          rows: finalResult.rows,
+          executionTimeMs: finalResult.execution_time_ms,
+          rowCount: finalResult.row_count,
+          database: finalResult.database_used,
+          error: finalResult.error,
+          suggestedQuestions: finalResult.suggested_questions,
+          geminiCallsCount: finalResult.gemini_calls_count,
+          steps: finalResult.steps || accumulatedSteps,
+          timestamp: new Date().toISOString(),
+        };
+      } else {
+        assistantMsg = {
+          id: Math.random().toString(),
+          role: 'assistant',
+          text: 'I encountered an error while processing your request.',
+          error: errorMsg || 'Unknown error from AI pipeline.',
+          steps: [...accumulatedSteps],
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      // Append assistant message ONLY if the active conversation is still targetConversationId
+      if (activeConversationId === targetConversationId) {
+        setMessages(prev => [...prev, assistantMsg]);
+      }
+
+      // If first message, reload conversations list to update title
+      if (isFirstMessage) {
+        handleReloadConversations();
+      }
+
+    } catch (err: any) {
+      const errMsg: Message = {
+        id: Math.random().toString(),
+        role: 'assistant',
+        text: 'I encountered an error while processing your request.',
+        error: err.message || 'Unknown connection error.',
+        steps: [...accumulatedSteps],
+        timestamp: new Date().toISOString(),
+      };
+      if (activeConversationId === targetConversationId) {
+        setMessages(prev => [...prev, errMsg]);
+      }
+    } finally {
+      setPipelineLoading(prev => ({ ...prev, [targetConversationId]: false }));
+      // Keep the completed steps visible for 3 seconds then clear
+      setTimeout(() => {
+        setPipelineSteps(prev => {
+          const next = { ...prev };
+          delete next[targetConversationId];
+          return next;
+        });
+      }, 3000);
     }
   };
 
@@ -263,6 +376,7 @@ export const App: React.FC = () => {
         connectionInfo={connectionInfo}
         onConnectSuccess={handleConnectSuccess}
         onOpenConnectionModal={() => { setModalError(''); setIsConnectModalOpen(true); }}
+        runningPipelines={pipelineLoading}
       />
 
       {/* Chat */}
@@ -271,9 +385,9 @@ export const App: React.FC = () => {
         activeConversationId={activeConversationId}
         selectedDatabases={selectedDatabases}
         messages={messages}
-        onAddMessage={handleAddMessage}
-        loading={loading}
-        setLoading={setLoading}
+        onSendMessage={handleSendMessage}
+        pipelineLoading={activeConversationId ? !!pipelineLoading[activeConversationId] : false}
+        pipelineSteps={activeConversationId ? (pipelineSteps[activeConversationId] || []) : []}
         conversations={conversations}
         connectionInfo={connectionInfo}
         messagesLoading={messagesLoading}

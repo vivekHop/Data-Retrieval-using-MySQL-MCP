@@ -16,6 +16,7 @@ export const QueryHistory: React.FC<QueryHistoryProps> = ({ session, isOpen, onC
   const [searchTerm, setSearchTerm] = useState('');
   const [expandedLogs, setExpandedLogs] = useState<Record<number, boolean>>({});
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'SUCCESS' | 'FAILURE'>('ALL');
 
   const isAdmin = session.role === 'admin';
 
@@ -51,16 +52,35 @@ export const QueryHistory: React.FC<QueryHistoryProps> = ({ session, isOpen, onC
     }));
   };
 
+  const parseSqlQueries = (sqlStr: string | null | undefined): string[] => {
+    if (!sqlStr) return [];
+    const trimmed = sqlStr.trim();
+    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(sqlStr);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (e) {
+        // Fallback
+      }
+    }
+    return [sqlStr];
+  };
+
   if (!isOpen) return null;
 
   const filteredLogs = logs.filter((log) => {
     const term = searchTerm.toLowerCase();
-    return (
+    const matchesSearch = (
       log.question.toLowerCase().includes(term) ||
       (log.generated_sql && log.generated_sql.toLowerCase().includes(term)) ||
       log.user_id.toLowerCase().includes(term) ||
       (log.database_used && log.database_used.toLowerCase().includes(term))
     );
+
+    if (statusFilter === 'ALL') return matchesSearch;
+    return matchesSearch && log.status === statusFilter;
   });
 
   // Calculate quick stats
@@ -105,19 +125,34 @@ export const QueryHistory: React.FC<QueryHistoryProps> = ({ session, isOpen, onC
           <>
             {/* Stats Bar */}
             <div className="grid grid-cols-4 gap-4 p-4 border-b border-brand-border bg-brand-dark/30">
-              <div className="bg-brand-dark border border-brand-border/60 rounded-xl p-3 text-center">
+              <div 
+                onClick={() => setStatusFilter('ALL')}
+                className={`bg-brand-dark border rounded-xl p-3 text-center cursor-pointer transition-all hover:bg-brand-dark/80 select-none ${
+                  statusFilter === 'ALL' ? 'border-brand-green ring-1 ring-brand-green/30' : 'border-brand-border/60 hover:border-gray-500'
+                }`}
+              >
                 <span className="block text-[10px] uppercase font-bold text-gray-500 tracking-wider mb-1">Total Queries</span>
                 <span className="text-lg font-bold text-white">{totalQueries}</span>
               </div>
-              <div className="bg-brand-dark border border-brand-border/60 rounded-xl p-3 text-center">
+              <div 
+                onClick={() => setStatusFilter('SUCCESS')}
+                className={`bg-brand-dark border rounded-xl p-3 text-center cursor-pointer transition-all hover:bg-brand-dark/80 select-none ${
+                  statusFilter === 'SUCCESS' ? 'border-brand-green ring-1 ring-brand-green/30' : 'border-brand-border/60 hover:border-gray-500'
+                }`}
+              >
                 <span className="block text-[10px] uppercase font-bold text-gray-500 tracking-wider mb-1">Successful</span>
                 <span className="text-lg font-bold text-brand-green">{successQueries}</span>
               </div>
-              <div className="bg-brand-dark border border-brand-border/60 rounded-xl p-3 text-center">
+              <div 
+                onClick={() => setStatusFilter('FAILURE')}
+                className={`bg-brand-dark border rounded-xl p-3 text-center cursor-pointer transition-all hover:bg-brand-dark/80 select-none ${
+                  statusFilter === 'FAILURE' ? 'border-red-500 ring-1 ring-red-500/30' : 'border-brand-border/60 hover:border-gray-500'
+                }`}
+              >
                 <span className="block text-[10px] uppercase font-bold text-gray-500 tracking-wider mb-1">Failures</span>
                 <span className="text-lg font-bold text-red-400">{errorQueries}</span>
               </div>
-              <div className="bg-brand-dark border border-brand-border/60 rounded-xl p-3 text-center">
+              <div className="bg-brand-dark border border-brand-border/60 rounded-xl p-3 text-center select-none">
                 <span className="block text-[10px] uppercase font-bold text-gray-500 tracking-wider mb-1">Avg Execution</span>
                 <span className="text-lg font-bold text-blue-400">{avgTime}ms</span>
               </div>
@@ -226,31 +261,42 @@ export const QueryHistory: React.FC<QueryHistoryProps> = ({ session, isOpen, onC
                       {/* Log Details (Expanded) */}
                       {isExpanded && (
                         <div className="px-4 pb-4 pt-2 border-t border-brand-border/40 bg-brand-dark/60 space-y-3.5 animate-slide-in">
-                          {log.generated_sql && (
-                            <div className="space-y-1.5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
-                                  Generated SQL Query
+                          {(() => {
+                            const queries = parseSqlQueries(log.generated_sql);
+                            if (queries.length === 0) return null;
+                            return (
+                              <div className="space-y-3">
+                                <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
+                                  Executed SQL Query {queries.length > 1 ? `(${queries.length} Queries)` : ''}
                                 </span>
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleCopySql(log.id, log.generated_sql || '');
-                                  }}
-                                  className="p-1 bg-brand-panel hover:bg-brand-border border border-brand-border rounded-lg text-gray-400 hover:text-white transition-all cursor-pointer"
-                                >
-                                  {copiedId === log.id ? (
-                                    <Check className="w-3 h-3 text-brand-green" />
-                                  ) : (
-                                    <Copy className="w-3 h-3" />
-                                  )}
-                                </button>
+                                {queries.map((q, qIdx) => (
+                                  <div key={qIdx} className="space-y-1.5">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[9px] font-semibold text-brand-green/80 uppercase tracking-wide">
+                                        {queries.length > 1 ? `SQL Command #${qIdx + 1}` : 'SQL Command'}
+                                      </span>
+                                      <button
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleCopySql(log.id * 1000 + qIdx, q);
+                                        }}
+                                        className="p-1 bg-brand-panel hover:bg-brand-border border border-brand-border rounded-lg text-gray-400 hover:text-white transition-all cursor-pointer"
+                                      >
+                                        {copiedId === log.id * 1000 + qIdx ? (
+                                          <Check className="w-3 h-3 text-brand-green" />
+                                        ) : (
+                                          <Copy className="w-3 h-3" />
+                                        )}
+                                      </button>
+                                    </div>
+                                    <pre className="p-3 bg-brand-dark border border-brand-border/50 rounded-xl text-[11px] font-mono text-emerald-450 overflow-x-auto text-emerald-400">
+                                      {q}
+                                    </pre>
+                                  </div>
+                                ))}
                               </div>
-                              <pre className="p-3 bg-brand-dark border border-brand-border/50 rounded-xl text-[11px] font-mono text-emerald-400 overflow-x-auto">
-                                {log.generated_sql}
-                              </pre>
-                            </div>
-                          )}
+                            );
+                          })()}
 
                           {log.error_message && (
                             <div className="space-y-1">
