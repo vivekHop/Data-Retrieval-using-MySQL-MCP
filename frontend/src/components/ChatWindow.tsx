@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { api } from '../api';
 import type { Message, UserSession } from '../types';
-import { Send, Loader2, Database, Code, Table2, BarChart3, Copy, Check, Download, AlertCircle, Sparkles } from 'lucide-react';
+import { Send, Loader2, Database, Code, Table2, BarChart3, Copy, Check, Download, AlertCircle, Sparkles, MessageSquare, RefreshCw, Trash2 } from 'lucide-react';
 import { ResponsiveContainer, BarChart, Bar, AreaChart, Area, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
 
 interface ChatWindowProps {
@@ -15,6 +15,8 @@ interface ChatWindowProps {
   conversations: any[];
   connectionInfo: { connected: boolean; base_url: string | null; engine_type: string | null; database: string } | null;
   messagesLoading?: boolean;
+  onReloadMessages?: () => void;
+  onDeleteMessage?: (messageId: string) => void;
 }
 
 export const ChatWindow: React.FC<ChatWindowProps> = ({
@@ -28,6 +30,8 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
   conversations,
   connectionInfo,
   messagesLoading = false,
+  onReloadMessages,
+  onDeleteMessage,
 }) => {
   const [input, setInput] = useState('');
   const activeConversation = conversations.find(c => c.id === activeConversationId);
@@ -296,6 +300,39 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-brand-dark relative overflow-hidden">
+      {/* Header bar */}
+      <div className="px-6 py-3.5 bg-brand-panel border-b border-brand-border flex items-center justify-between z-10 shadow-sm shadow-black/5 animate-slide-in">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-xl bg-brand-green/10 border border-brand-green/20 flex items-center justify-center text-brand-green shrink-0">
+            <MessageSquare className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-xs font-bold text-white truncate">
+              {activeConversation?.title || 'No Conversation Selected'}
+            </h3>
+            {connectionInfo && (
+              <p className="text-[9px] text-gray-500 font-mono mt-0.5 truncate uppercase tracking-wider">
+                Target Source · {connectionInfo.engine_type || 'JDBC'}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {activeConversationId && onReloadMessages && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onReloadMessages}
+              title="Reload all messages for this chat"
+              className="px-3 py-1.5 bg-brand-dark hover:bg-brand-border border border-brand-border rounded-xl text-gray-400 hover:text-white transition-all cursor-pointer flex items-center gap-1.5 text-[10px] font-bold"
+            >
+              <RefreshCw className={`w-3 h-3 ${loading || messagesLoading ? 'animate-spin text-brand-green' : ''}`} />
+              Sync Messages
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Messages list */}
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
         {messagesLoading ? (
@@ -403,26 +440,44 @@ export const ChatWindow: React.FC<ChatWindowProps> = ({
                 <div className={`max-w-2xl space-y-3 ${isAssistant ? 'w-full' : ''}`}>
                   {/* Message bubble */}
                   <div
-                    className={`rounded-2xl p-4.5 ${
+                    className={`rounded-2xl p-4.5 relative ${
                       isAssistant
-                        ? 'bg-brand-panel border border-brand-border shadow-md'
-                        : 'bg-brand-green text-brand-dark font-medium shadow-md'
+                        ? 'bg-brand-panel border border-brand-border shadow-md group/asst-bubble'
+                        : 'bg-brand-green text-brand-dark font-medium shadow-md group/user-bubble'
                     }`}
                   >
+                    {/* Delete specific message button */}
+                    {onDeleteMessage && (
+                      <button
+                        type="button"
+                        onClick={() => onDeleteMessage(msg.id)}
+                        className={`absolute top-2.5 right-2.5 opacity-0 transition-all duration-200 p-1 rounded-lg cursor-pointer z-20 ${
+                          isAssistant
+                            ? 'group-hover/asst-bubble:opacity-100 bg-brand-dark/50 hover:bg-brand-dark text-gray-500 hover:text-red-400 border border-brand-border'
+                            : 'group-hover/user-bubble:opacity-100 bg-brand-dark/10 hover:bg-brand-dark/20 text-brand-dark hover:text-red-700'
+                        }`}
+                        title="Delete Message"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+
                     {!isAssistant ? (
-                      <p className="text-sm m-0 leading-relaxed">{msg.text}</p>
+                      <p className="text-sm m-0 leading-relaxed pr-6">{msg.text}</p>
                     ) : (
                       <div className="space-y-4">
                         {/* Summary response text */}
-                        <div className="prose prose-invert max-w-none">
-                          {renderSimpleMarkdown(msg.text)}
-                        </div>
+                        {!msg.error && (
+                          <div className="prose prose-invert max-w-none">
+                            {renderSimpleMarkdown(msg.text)}
+                          </div>
+                        )}
 
                         {/* Error state */}
                         {msg.error && (
-                          <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-xl text-red-400 text-xs flex gap-2 items-start">
-                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                            <div className="font-mono">{msg.error}</div>
+                          <div className="p-3 bg-red-950/20 border border-red-500/20 rounded-xl text-red-400 text-xs flex gap-2 items-start animate-shake">
+                            <AlertCircle className="w-4.5 h-4.5 shrink-0 text-red-500" />
+                            <div className="font-mono font-semibold tracking-wide whitespace-pre-wrap">{msg.error}</div>
                           </div>
                         )}
 

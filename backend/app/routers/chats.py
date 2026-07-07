@@ -5,7 +5,8 @@ from app.logger import (
     db_save_conversation,
     db_delete_conversation,
     db_get_conversations,
-    db_get_messages
+    db_get_messages,
+    db_delete_message
 )
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -45,3 +46,9 @@ async def delete_conversation(conversation_id: str):
 async def get_conversation_messages(conversation_id: str):
     """Retrieves all message history for a given conversation."""
     return db_get_messages(conversation_id)
+
+@router.delete("/messages/{message_id}")
+async def delete_message(message_id: str):
+    """Deletes a specific message by its ID."""
+    db_delete_message(message_id)
+    return {"status": "success"}

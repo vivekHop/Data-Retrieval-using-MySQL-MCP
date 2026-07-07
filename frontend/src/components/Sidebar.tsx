@@ -12,6 +12,7 @@ interface SidebarProps {
   onCreateConversation: () => void;
   onDeleteConversation: (id: string) => void;
   onRenameConversation: (id: string, title: string) => void;
+  onReloadConversations?: () => void;
   onOpenAuditLogs: () => void;
   selectedDatabases: string[];
   onSelectDatabases: (dbs: string[]) => void;
@@ -29,6 +30,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onCreateConversation,
   onDeleteConversation,
   onRenameConversation,
+  onReloadConversations,
   onOpenAuditLogs,
   selectedDatabases,
   onSelectDatabases,
@@ -133,14 +135,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
         ) : (
           <div className="flex flex-col h-full">
             {/* New chat action */}
-            <div className="p-3">
+            <div className="p-3 flex gap-2">
               <button
                 onClick={onCreateConversation}
-                className="w-full py-2 bg-brand-green hover:bg-brand-green-hover text-brand-dark font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md shadow-brand-green/5"
+                className="flex-1 py-2 bg-brand-green hover:bg-brand-green-hover text-brand-dark font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-md shadow-brand-green/5"
               >
                 <Plus className="w-3.5 h-3.5" />
-                New Conversation
+                New Chat
               </button>
+              {onReloadConversations && (
+                <button
+                  type="button"
+                  onClick={onReloadConversations}
+                  className="px-3 py-2 bg-brand-dark hover:bg-brand-border border border-brand-border text-gray-400 hover:text-white rounded-xl transition-all cursor-pointer flex items-center justify-center"
+                  title="Reload Chats List"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
             {/* Chat search */}

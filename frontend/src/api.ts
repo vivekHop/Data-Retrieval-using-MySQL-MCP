@@ -321,5 +321,15 @@ export const api = {
     if (!response.ok) throw new Error('Failed to fetch conversation messages');
     return response.json();
   },
+
+  // Chats: Delete a specific message
+  async deleteMessage(messageId: string) {
+    const response = await fetch(`${API_BASE_URL}/chats/messages/${messageId}`, {
+      method: 'DELETE',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) throw new Error('Failed to delete message');
+    return response.json();
+  },
 };
 export default api;

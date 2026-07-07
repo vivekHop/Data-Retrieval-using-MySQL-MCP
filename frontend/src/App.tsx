@@ -140,6 +140,43 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleReloadConversations = async () => {
+    const url = connectionInfo?.base_url ?? undefined;
+    try {
+      const list: Conversation[] = await api.getConversations(url ?? undefined);
+      setConversations(list);
+      if (activeConversationId && list.some(c => c.id === activeConversationId)) {
+        // Keep active
+      } else if (list.length > 0) {
+        await loadMessagesForConversation(list[0].id);
+      }
+    } catch (err) {
+      console.error('Failed to reload conversations:', err);
+    }
+  };
+
+  const handleReloadMessages = async () => {
+    if (!activeConversationId) return;
+    setMessagesLoading(true);
+    try {
+      const msgs = await api.getConversationMessages(activeConversationId);
+      setMessages(msgs);
+    } catch (err) {
+      console.error('Failed to reload messages:', err);
+    } finally {
+      setMessagesLoading(false);
+    }
+  };
+
+  const handleDeleteMessage = async (messageId: string) => {
+    try {
+      await api.deleteMessage(messageId);
+      setMessages(prev => prev.filter(m => m.id !== messageId));
+    } catch (err) {
+      console.error('Failed to delete message:', err);
+    }
+  };
+
   const handleAddMessage = (msg: Message) => {
     if (!activeConversationId) return;
     setMessages(prev => [...prev, msg]);
@@ -219,6 +256,7 @@ export const App: React.FC = () => {
         onCreateConversation={handleCreateConversation}
         onDeleteConversation={handleDeleteConversation}
         onRenameConversation={handleRenameConversation}
+        onReloadConversations={handleReloadConversations}
         onOpenAuditLogs={() => setIsAuditLogsOpen(true)}
         selectedDatabases={selectedDatabases}
         onSelectDatabases={setSelectedDatabases}
@@ -239,6 +277,8 @@ export const App: React.FC = () => {
         conversations={conversations}
         connectionInfo={connectionInfo}
         messagesLoading={messagesLoading}
+        onReloadMessages={handleReloadMessages}
+        onDeleteMessage={handleDeleteMessage}
       />
 
       {/* Audit logs drawer */}

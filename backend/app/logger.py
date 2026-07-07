@@ -332,5 +332,19 @@ def db_get_messages(conversation_id: str) -> List[Dict[str, Any]]:
         logger.error(f"Failed to retrieve conversation messages: {e}")
     return results
 
+def db_delete_message(message_id: str):
+    """Deletes a specific message from the Neon database."""
+    if not settings.DATABASE_URL:
+        return
+    try:
+        conn = psycopg2.connect(settings.DATABASE_URL)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM conversation_messages WHERE id = %s", (message_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to delete message: {e}")
+
 # Automatically run initialization on import
 init_audit_db()
